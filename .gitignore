@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Laufzeitdaten: Inbox, Kopplungen, Token
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+sim-inbox.sqlite*
+
+# Vom Wizard erzeugte Proxy-Konfigurationen (pro Installation verschieden)
+generated/
+
+# Testreste
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Testreste der isolierten Runtime
+isolated-hermes-*/

@@ -1,0 +1,5 @@
+name: si-m-bridge
+version: 0.1.0
+description: Explizite, profilgebundene Benachrichtigungen und Gespraechsrunden fuer einen gekoppelten SI-M Orb
+provides_tools:
+  - sim_notify
