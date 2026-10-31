@@ -73,37 +73,79 @@ Damit du nicht mehr erwartest, als drin ist:
 
 ## Schnellstart
 
+> **Wichtig:** Die Bridge redet mit dem Hermes-Agenten ueber dessen interne APIs.
+> Sie muss deshalb mit **dem Python laufen, in dem Hermes installiert ist** – ein
+> eigenes virtualenv reicht nicht. Diesen Ablauf habe ich auf einem fremden
+> System durchgespielt; er funktioniert so.
+
 ```bash
-git clone https://github.com/<dein-account>/si-m-bridge.git
+git clone https://github.com/jokaje/si-m-bridge.git
 cd si-m-bridge
 
-python -m venv .venv && . .venv/bin/activate
-pip install -e .
-
-# 1. Weg nach draussen planen (schreibt nur Konfigdateien zum Pruefen)
-python cli.py setup --exposure tailscale \
-  --hermes-home /srv/hermes-orb --profile orb
-
-# 2. Konfiguration als Dienst vorbereiten
-export SIM_CONNECTOR_HERMES_HOME=/srv/hermes-orb
-export SIM_CONNECTOR_DB=/srv/hermes-orb/sim-inbox.sqlite
-export SIM_HERMES_PROFILE=orb
-python cli.py --db "$SIM_CONNECTOR_DB" doctor
-
-# 3. Dienst starten (nur Loopback)
-python cli.py --db "$SIM_CONNECTOR_DB" serve
+# 1. In die Hermes-Umgebung installieren (Pfad anpassen!)
+HERMES_VENV=~/.hermes/venv          # dort, wo dein "hermes" liegt
+$HERMES_VENV/bin/pip install -e .
+$HERMES_VENV/bin/si-m-bridge --help  # muss die Unterbefehle zeigen
 ```
 
-Koppeln (Schritt 4) erst, wenn der HTTPS-Weg wirklich antwortet:
+```bash
+# 2. Privates Home fuer den Orb-Agenten (nicht dein Hauptprofil!)
+mkdir -p ~/hermes-orb && chmod 700 ~/hermes-orb
+mkdir -p ~/hermes-orb/plugins/si-m-bridge
+cp plugin.yaml __init__.py connector.py audio_bridge.py ~/hermes-orb/plugins/si-m-bridge/
+```
+
+`~/hermes-orb/config.yaml` anlegen – mit dem Provider, den dein Agent nutzt:
+
+```yaml
+model:
+  provider: <dein-provider>
+  default: <dein-modell>
+
+providers:
+  <dein-provider>:
+    api: <dein-endpunkt>
+    default_model: <dein-modell>
+
+plugins:
+  enabled:
+    - si-m-bridge
+
+platform_toolsets:
+  cli:
+    - sim_bridge        # nur wenn der Agent benachrichtigen darf
+```
 
 ```bash
-python cli.py --db "$SIM_CONNECTOR_DB" pair \
+# 3. Plugin aktivieren und pruefen
+export HERMES_HOME=~/hermes-orb
+$HERMES_VENV/bin/hermes plugins enable si-m-bridge
+$HERMES_VENV/bin/hermes plugins doctor --ci "$HERMES_HOME/plugins/si-m-bridge"
+
+# 4. Weg nach draussen planen (schreibt nur Konfig zum Pruefen)
+export SIM_CONNECTOR_HERMES_HOME=$HERMES_HOME
+export SIM_CONNECTOR_DB=$HERMES_HOME/sim-inbox.sqlite
+export SIM_HERMES_PROFILE=orb
+$HERMES_VENV/bin/si-m-bridge setup --exposure tailscale
+
+# 5. Konfiguration pruefen, dann Dienst starten (nur Loopback)
+$HERMES_VENV/bin/si-m-bridge --db "$SIM_CONNECTOR_DB" doctor
+$HERMES_VENV/bin/si-m-bridge --db "$SIM_CONNECTOR_DB" serve
+```
+
+Koppeln (Schritt 6) erst, wenn der HTTPS-Weg wirklich antwortet:
+
+```bash
+$HERMES_VENV/bin/si-m-bridge --db "$SIM_CONNECTOR_DB" pair \
   --owner owner-a --profile orb --device orb-a \
   --base-url https://orb-host.tail1234.ts.net
 ```
 
-Der `pair`-Befehl gibt eine `sim://pair?...`-URI aus. Die gehoert in einen
-QR-Code – **nicht** in Logs, Screenshots oder Chats.
+Der `pair`-Befehl gibt eine `sim://pair?...`-URI aus (rund 130 Zeichen). Die
+gehoert in einen QR-Code – **nicht** in Logs, Screenshots oder Chats.
+
+**Erster Agenten-Turn:** rechne beim ersten Aufruf mit 20–40 Sekunden, weil das
+Modell erst geladen wird. Danach antwortet es deutlich schneller.
 
 ---
 

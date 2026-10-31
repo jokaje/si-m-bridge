@@ -32,6 +32,16 @@ def check_compatibility():
         from hermes_cli.tools_config import _get_platform_tools
         from hermes_cli.plugins_discovery import _get_enabled_plugins, _get_disabled_plugins
         from run_agent import AIAgent
+    except ImportError as exc:
+        # By far the most common first-run failure: the bridge was installed into
+        # its own virtualenv, where Hermes simply does not exist.
+        raise RuntimeError(
+            'Hermes ist in dieser Python-Umgebung nicht installiert. Die Bridge muss '
+            'mit dem Python laufen, in dem Hermes installiert ist (z.B. '
+            '"sudo -u <dienst> <hermes-venv>/bin/pip install -e ." oder Aufruf mit '
+            'diesem Interpreter). Siehe README, Abschnitt "Schnellstart".'
+        ) from exc
+    try:
         contracts = (
             (_resolve_model_and_provider, ('cfg', 'model', 'provider')),
             (resolve_runtime_with_fallback, ('config', 'requested', 'target_model', 'explicit_base_url', 'explicit_api_key')),
@@ -43,7 +53,7 @@ def check_compatibility():
             params = inspect.signature(fn).parameters
             if any(name not in params for name in names):
                 raise TypeError(f'{fn.__module__}.{fn.__name__} contract changed')
-    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+    except (AttributeError, TypeError, ValueError) as exc:
         raise RuntimeError('unsupported Hermes connector integration API; review installed Hermes before use') from exc
 
 
