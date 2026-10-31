@@ -150,6 +150,28 @@ async def hermes_turn(url, key, text, session_id):
         if not isinstance(reply,str): raise ValueError('invalid upstream reply')
         return reply[:4096]
 
+def _is_async_callable(fn):
+    """True for async functions and for objects with an async __call__.
+
+    `inspect.iscoroutinefunction` returns False for a callable instance whose
+    `__call__` is async -- such an adapter was silently run in a worker thread,
+    which returns a coroutine object instead of audio and surfaces as a 503.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return True
+    call = getattr(fn, '__call__', None)
+    return inspect.iscoroutinefunction(call)
+
+
+async def _call(fn, *args, timeout=None):
+    """Await an async adapter, or run a sync one off the event loop."""
+    if _is_async_callable(fn):
+        coro = fn(*args)
+    else:
+        coro = asyncio.to_thread(fn, *args)
+    return await asyncio.wait_for(coro, timeout=timeout) if timeout else await coro
+
+
 def create_app(store, hermes_url=None, hermes_key=None, transcribe=None, hermes_profile=None, synthesize=None, gateway_attestation=None, turn_runner=None):
     app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None)
     @app.middleware('http')
@@ -195,7 +217,7 @@ def create_app(store, hermes_url=None, hermes_key=None, transcribe=None, hermes_
         try:
             data=await request.json()
             if set(data)!={'version','text'} or data['version']!=1 or not isinstance(data['text'],str) or not 1<=len(data['text'])<=4096: raise ValueError()
-            reply=await turn_runner(data['text'],store.session(s)) if turn_runner else await hermes_turn(hermes_url,hermes_key,data['text'],store.session(s))
+            reply=await _call(turn_runner,data['text'],store.session(s)) if turn_runner else await hermes_turn(hermes_url,hermes_key,data['text'],store.session(s))
         except (ValueError,KeyError,TypeError,httpx.HTTPError): raise HTTPException(503,'turn unavailable')
         return {'version':1,'reply':reply}
     @app.post('/v1/turn-stream')
@@ -210,14 +232,11 @@ def create_app(store, hermes_url=None, hermes_key=None, transcribe=None, hermes_
                 if set(data)!={'version','pcm16le_b64','sample_rate'} or data['version']!=1 or data['sample_rate']!=16000 or not isinstance(data['pcm16le_b64'],str) or len(data['pcm16le_b64'])>90000: raise ValueError()
                 pcm=base64.b64decode(data['pcm16le_b64'],validate=True)
             if not pcm or len(pcm)>(256000 if request.headers.get('content-type','').startswith('application/vnd.kim.pcm;') else 64000) or len(pcm)%2 or transcribe is None or synthesize is None: raise ValueError()
-            result=await asyncio.wait_for(asyncio.to_thread(transcribe,pcm),timeout=15)
+            result=await _call(transcribe,pcm,timeout=15)
             text=result.decode('utf-8') if isinstance(result,bytes) else result
             if not isinstance(text,str) or not 1<=len(text)<=4096: raise ValueError()
-            reply=await turn_runner(text,store.session(s)) if turn_runner else await hermes_turn(hermes_url,hermes_key,text,store.session(s))
-            if inspect.iscoroutinefunction(synthesize):
-                pcm_out=await asyncio.wait_for(synthesize(reply),timeout=30)
-            else:
-                pcm_out=await asyncio.wait_for(asyncio.to_thread(synthesize,reply),timeout=30)
+            reply=await _call(turn_runner,text,store.session(s)) if turn_runner else await hermes_turn(hermes_url,hermes_key,text,store.session(s))
+            pcm_out=await _call(synthesize,reply,timeout=30)
             chunks=frames(pcm_out)
         except (ValueError,KeyError,TypeError,UnicodeError,httpx.HTTPError,asyncio.TimeoutError,AudioUnavailable,OSError): raise HTTPException(503,'audio unavailable')
         return StreamingResponse(iter(chunks),media_type='application/vnd.kim.stream-v1')

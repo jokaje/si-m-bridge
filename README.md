@@ -202,6 +202,8 @@ Ohne Sprache funktioniert Text. Fuer Sprachrunden brauchst du Adapter:
 ```bash
 # Spracherkennung: lokales Whisper-Modell ...
 export SIM_STT_MODEL_PATH=/pfad/zu/faster-whisper-modell
+# ... mit Sprachhinweis (deutlich treffsicherer als raten lassen)
+export SIM_STT_LANGUAGE=de
 # ... oder eigenes Kommando (PCM auf stdin, Text auf stdout)
 export SIM_STT_COMMAND='["mein-stt", "--raw"]'
 
@@ -212,6 +214,14 @@ export SIM_TTS_COMMAND='["mein-tts"]'
 ```
 
 Fehlt ein Adapter, antwortet die Bridge mit **503** statt mit Stille.
+
+**Modellwahl ist nicht egal.** Gemessen auf CPU mit einer deutschen Testfrage:
+`tiny` und `base` verhoeren kurze Sätze regelmäßig (aus „Test der Brücke" wurde
+„10時でブーク"), `small` erkennt sie korrekt. `SIM_STT_LANGUAGE` hilft auch dem
+kleinen Modell, ersetzt aber kein ausreichend großes. Nimm `small` oder größer.
+
+Der Sprachhinweis sollte aus der Sprachwahl kommen, die der Nutzer in App und Orb
+gesetzt hat — nicht geraten werden.
 
 ---
 
@@ -284,12 +294,16 @@ python -m unittest discover -s tests -v
 
 Ehrlich, damit niemand mehr erwartet als da ist:
 
-- **Getestet:** 37 Selbsttests, darunter eine echte Hermes-Runde in einem leeren
+- **Getestet:** 41 Selbsttests, darunter eine echte Hermes-Runde in einem leeren
   Test-Home gegen einen synthetischen Test-Provider, Abbruch- und
   Zeitlimitverhalten echter Worker-Prozesse, Kopplungs- und Inbox-Vertraege
   gegen Firmware- und App-Seite.
-- **Nicht getestet:** echtes Modell mit echten Zugangsdaten, physische
-  Audiowiedergabe am Orb, Live-OAuth, ein produktiver Reverse Proxy.
+- **Audiokette echt durchgespielt:** PCM rein → lokales Whisper → Agentenrunde →
+  lokale Sprachausgabe → gerahmte PCM-Frames → wieder erkannt. Die Tests laufen
+  nur mit `SIM_TEST_STT_MODEL` und `SIM_TEST_TTS_URL`; `tools/hoerprobe.py`
+  erzeugt dazu eine mithoerbare WAV-Datei.
+- **Nicht getestet:** echtes Modell mit echten Zugangsdaten, Wiedergabe am
+  physischen Orb-Lautsprecher, Live-OAuth, ein produktiver Reverse Proxy.
 - Die Firmware-Seite (Benachrichtigungen, Aufwachen) ist ein separater Kandidat
   und wird hier nicht ausgeliefert.
 

@@ -153,7 +153,8 @@ def main():
             p.error('only loopback bind allowed; use reviewed HTTPS reverse proxy')
         stt = None
         if os.environ.get('SIM_STT_MODEL_PATH'):
-            stt = WhisperLocal(os.environ['SIM_STT_MODEL_PATH'])
+            stt = WhisperLocal(os.environ['SIM_STT_MODEL_PATH'],
+                               language=os.environ.get('SIM_STT_LANGUAGE') or None)
         elif os.environ.get('SIM_STT_COMMAND'):
             stt = CommandAdapter(json.loads(os.environ['SIM_STT_COMMAND']))
         tts = None

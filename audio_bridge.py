@@ -2,6 +2,7 @@
 import asyncio
 import io
 import os
+import re
 import struct
 import subprocess
 import wave
@@ -40,16 +41,27 @@ class CommandAdapter:
 
 
 class WhisperLocal:
-    def __init__(self, model_path):
+    """Local faster-whisper model.
+
+    `language` is an optional ISO-639-1 hint. Without it the model guesses, which
+    on small models regularly produces the wrong language entirely (a German
+    sentence came back as Japanese with `base`). Pass the language the user
+    picked in the app here instead of letting the model decide.
+    """
+    def __init__(self, model_path, language=None):
         if not model_path or not os.path.isdir(model_path):
             raise AudioUnavailable('local Whisper model directory required')
+        if language is not None and (not isinstance(language, str) or not re.fullmatch(r'[a-z]{2}', language)):
+            raise AudioUnavailable('language hint must be a two-letter code')
         from faster_whisper import WhisperModel
         self.model = WhisperModel(model_path, local_files_only=True, device='cpu', compute_type='int8')
+        self.language = language
 
     def __call__(self, pcm):
         import numpy as np
         samples = np.frombuffer(pcm, dtype='<i2').astype(np.float32) / 32768
-        segments, _ = self.model.transcribe(samples, beam_size=1, vad_filter=False)
+        segments, _ = self.model.transcribe(samples, beam_size=1, vad_filter=False,
+                                            language=self.language)
         return ' '.join(s.text.strip() for s in segments).strip()
 
 
