@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import socket
 import tempfile
 import threading
@@ -13,9 +14,20 @@ from urllib.parse import urlencode
 from unittest.mock import patch
 from connector import Store, create_app, safe_url
 
+# Das App-Projekt mit dem generierten QR-Fixture liegt in der
+# Entwicklungsumgebung neben diesem Projekt. Ueber SIM_APP_PROJECT auch an
+# anderer Stelle nutzbar; fehlt es, wird der Test uebersprungen statt rot zu
+# werden -- ein frischer Klon hat kein App-Repo.
+APP_QR_FIXTURE = Path(os.environ.get('SIM_APP_PROJECT')
+                      or Path(__file__).resolve().parents[2] / 'si-m-connector' / 'project') \
+    / 'app/src/test/resources/connector/server-pair-qr.txt'
+
+
 class ConnectorTests(unittest.TestCase):
+    @unittest.skipUnless(APP_QR_FIXTURE.is_file(),
+                         'App-Projekt fehlt (SIM_APP_PROJECT setzen, um den QR-Gegentest zu aktivieren)')
     def test_android_pairing_qr_fixture_generated_by_server(self):
-        fixture=Path(__file__).resolve().parents[2]/'si-m-connector'/'project'/'app'/'src'/'test'/'resources'/'connector'/'server-pair-qr.txt'
+        fixture = APP_QR_FIXTURE
         with tempfile.TemporaryDirectory(dir=__import__('os').environ.get('TMPDIR')) as tmp:
             store=Store(Path(tmp)/'qr.sqlite')
             with patch('connector.secrets.token_urlsafe',return_value='SyntheticPairingCode_0123456789abcdefghijk'):

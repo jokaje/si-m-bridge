@@ -2,6 +2,7 @@
 import asyncio
 import ctypes
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -11,9 +12,16 @@ import httpx
 from connector import Store, create_app
 
 ROOT = Path(__file__).resolve().parents[2]
-FIRMWARE = ROOT / 'notification-firmware/project'
+# Das Firmware-Projekt liegt in der Entwicklungsumgebung neben diesem Projekt.
+# Ueber SIM_FIRMWARE_PROJECT auch an anderer Stelle nutzbar; fehlt es, wird der
+# Test uebersprungen statt rot zu werden -- ein frischer Klon hat kein Firmware-Repo.
+FIRMWARE = Path(os.environ.get('SIM_FIRMWARE_PROJECT') or ROOT / 'notification-firmware/project')
+CROSS_WIRE_READY = (FIRMWARE / 'components/muse/orb_notifications_client.c').is_file() and \
+                   (FIRMWARE / 'managed_components/espressif__cjson/cJSON/cJSON.c').is_file()
 
 
+@unittest.skipUnless(CROSS_WIRE_READY,
+                     'Firmware-Projekt fehlt (SIM_FIRMWARE_PROJECT setzen, um den Cross-Check zu aktivieren)')
 class CrossWire(unittest.TestCase):
     def test_server_json_through_actual_c_cursor_decoder(self):
         source = (FIRMWARE / 'components/muse/orb_notifications_client.c').read_text()

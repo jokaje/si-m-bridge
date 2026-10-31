@@ -243,6 +243,20 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://<host>/v1/inbox/meta
 `401` = erreichbar, Token fehlt oder falsch. `502/504` = Proxy erreicht die
 Bridge nicht. `503` = meistens Audio-Adapter fehlt oder Agentenrunde gescheitert.
 
+### Optionale Kreuztests gegen Firmware und App
+
+Zwei Tests vergleichen die Serverantworten mit dem echten C-Decoder der Firmware
+und mit dem QR-Fixture der Android-App. Diese Projekte liegen in der
+Entwicklungsumgebung **neben** diesem Repo. Ein frischer Klon hat sie nicht –
+dann werden die Tests sauber **uebersprungen**, nicht rot. Wer sie mitlaufen
+lassen will:
+
+```bash
+export SIM_FIRMWARE_PROJECT=/pfad/zu/notification-firmware/project
+export SIM_APP_PROJECT=/pfad/zu/si-m-connector/project
+python -m unittest discover -s tests -v
+```
+
 ---
 
 ## Betriebsdetails
