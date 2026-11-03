@@ -2,6 +2,7 @@
 import asyncio
 import io
 import os
+import signal
 import re
 import struct
 import subprocess
@@ -15,6 +16,29 @@ class AudioUnavailable(Exception):
     pass
 
 
+def speech_chunks(text, max_chars=75, max_chunks=12):
+    """Split complete speech at word boundaries; reject impossible wire budgets."""
+    if not isinstance(text, str) or not text.strip():
+        raise AudioUnavailable('empty speech')
+    words = text.split()
+    chunks = []
+    current = ''
+    for word in words:
+        if len(word) > max_chars:
+            raise AudioUnavailable('speech word exceeds chunk limit')
+        candidate = (current + ' ' + word).strip()
+        if len(candidate) > max_chars:
+            chunks.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    if len(chunks) > max_chunks:
+        raise AudioUnavailable('speech exceeds turn budget')
+    return chunks
+
+
 class CommandAdapter:
     """Explicit argv only: stdin PCM for STT, stdin UTF-8 for TTS; stdout text/WAV."""
     def __init__(self, argv, timeout=15, max_output=2_000_000):
@@ -25,16 +49,26 @@ class CommandAdapter:
         self.argv, self.timeout, self.max_output = argv, timeout, max_output
 
     def __call__(self, data):
+        is_tts = isinstance(data, str)
+        if is_tts:
+            input_bytes = data.encode('utf-8')
+        elif isinstance(data, (bytes, bytearray)):
+            input_bytes = bytes(data)
+        else:
+            raise AudioUnavailable('invalid adapter input type')
         try:
             process = subprocess.Popen(self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, shell=False, close_fds=True)
+                                       stderr=subprocess.DEVNULL, shell=False, close_fds=True,
+                                       start_new_session=True)
             try:
-                output, _ = process.communicate(data, timeout=self.timeout)
+                output, _ = process.communicate(input_bytes, timeout=self.timeout)
             except subprocess.TimeoutExpired:
-                process.kill(); process.communicate()
+                os.killpg(process.pid, signal.SIGKILL); process.communicate()
                 raise AudioUnavailable('adapter timed out')
             if process.returncode or len(output) > self.max_output:
                 raise AudioUnavailable('adapter failed or oversized')
+            if is_tts and output.startswith(b'RIFF') and output[8:12] == b'WAVE':
+                return pcm_from_wav(output)
             return output
         except OSError as exc:
             raise AudioUnavailable('adapter unavailable') from exc
@@ -53,14 +87,17 @@ class WhisperLocal:
             raise AudioUnavailable('local Whisper model directory required')
         if language is not None and (not isinstance(language, str) or not re.fullmatch(r'[a-z]{2}', language)):
             raise AudioUnavailable('language hint must be a two-letter code')
-        from faster_whisper import WhisperModel
-        self.model = WhisperModel(model_path, local_files_only=True, device='cpu', compute_type='int8')
+        # Keep only spawn-serializable configuration in the web process. Native
+        # CTranslate2 threads and model weights must never be inherited by fork.
+        self.model_path = model_path
         self.language = language
 
     def __call__(self, pcm):
+        from faster_whisper import WhisperModel
         import numpy as np
+        model = WhisperModel(self.model_path, local_files_only=True, device='cpu', compute_type='int8')
         samples = np.frombuffer(pcm, dtype='<i2').astype(np.float32) / 32768
-        segments, _ = self.model.transcribe(samples, beam_size=1, vad_filter=False,
+        segments, _ = model.transcribe(samples, beam_size=1, vad_filter=False,
                                             language=self.language)
         return ' '.join(s.text.strip() for s in segments).strip()
 

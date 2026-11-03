@@ -1,0 +1,3 @@
+SI-M Bridge — Apache-2.0; see LICENSE.
+
+The Python wheel declares FastAPI, Uvicorn, HTTPX and cloudpickle runtime dependencies. Their licenses and transitive dependency licenses must be reviewed for each released lockfile or environment; this notice does not certify firmware, app, model or bundled binary rights. No firmware/app binaries are included in this wheel.

@@ -49,7 +49,10 @@ def run_setup(args):
             raise SystemExit('--url ist fuer diesen Modus erforderlich')
         url = _ask('Bereits erreichbare HTTPS-URL')
 
-    plan = plan_exposure(mode, domain=domain, port=args.port, url=url, tailnet_name=args.tailnet)
+    try:
+        plan = plan_exposure(mode, domain=domain, port=args.port, url=url, tailnet_name=args.tailnet)
+    except ValueError as exc:
+        raise SystemExit('ungueltiger Setup-Parameter: ' + str(exc)) from exc
     print()
     print(render_plan(plan))
 
@@ -128,13 +131,48 @@ def main():
     except (KeyError, OSError, ValueError) as exc:
         p.error('inbox store not configured: ' + str(exc))
     if args.cmd in ('pair', 'serve', 'doctor'):
-        from hermes_runtime import HermesRuntime
+        from hermes_runtime import HermesRuntime, GatewayRuntime
         try:
-            runtime = HermesRuntime(os.environ['SIM_HERMES_PROFILE'], os.environ['SIM_CONNECTOR_HERMES_HOME'])
-        except (KeyError, ValueError, ImportError, OSError) as exc:
-            p.error('dedicated Hermes runtime not ready: ' + str(exc))
+            if os.environ.get('SIM_AGENT_MODE') == 'gateway':
+                runtime = GatewayRuntime(os.environ['SIM_HERMES_PROFILE'],
+                    os.environ['SIM_GATEWAY_URL'], os.environ['SIM_GATEWAY_KEY_FILE'])
+            elif not os.environ.get('SIM_AGENT_MODE'):
+                runtime = HermesRuntime(os.environ['SIM_HERMES_PROFILE'], os.environ['SIM_CONNECTOR_HERMES_HOME'])
+            else:
+                raise ValueError('unknown agent mode')
+        except (KeyError, ValueError, ImportError, OSError, RuntimeError) as exc:
+            p.error('Hermes runtime not ready: ' + str(exc))
     if args.cmd == 'doctor':
-        print('Dedicated Hermes home, enabled plugin, and provider route configured (provider reachability not tested).')
+        if os.environ.get('SIM_AGENT_MODE') == 'gateway':
+            import httpx
+            key = runtime.key_file.read_text().strip()
+            try:
+                with httpx.Client(timeout=4, trust_env=False) as client:
+                    unauth = client.get(runtime.url + '/v1/models').status_code
+                    auth = client.get(runtime.url + '/v1/models', headers={'Authorization': 'Bearer ' + key}).status_code
+                if unauth != 401 or auth != 200:
+                    p.error('gateway authentication failed closed (unauth=%s, auth=%s)' % (unauth, auth))
+            except httpx.HTTPError as exc:
+                p.error('gateway unreachable: ' + type(exc).__name__)
+            print('Existing default gateway authenticated (unauth=401, auth=200); conversation not tested.')
+            return
+        try:
+            from hermes_cli.config import load_env, load_config
+            from hermes_cli.oneshot import _resolve_model_and_provider
+            from hermes_cli.runtime_provider import resolve_runtime_with_fallback
+            load_env()
+            cfg = load_config()
+            choice = _resolve_model_and_provider(cfg, None, None)
+            if not choice.model:
+                raise ValueError('profile model missing')
+            route, _ = resolve_runtime_with_fallback(
+                cfg, requested=choice.provider, target_model=choice.model,
+                explicit_base_url=choice.base_url, explicit_api_key=choice.api_key)
+            if not route.get('base_url') and not route.get('provider'):
+                raise ValueError('provider route missing')
+        except (ValueError, RuntimeError, ImportError, KeyError) as exc:
+            p.error('provider route not ready: ' + str(exc))
+        print('Dedicated Hermes home, enabled plugin and provider route resolved; provider reachability not tested.')
         return
     store = Store(db)
     if args.cmd == 'pair':

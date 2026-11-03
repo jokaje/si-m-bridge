@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "Bruecke zwischen einem Hermes-Agenten und dem SI-M Orb"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
-dependencies = ["fastapi>=0.110", "uvicorn>=0.25", "httpx>=0.26"]
+license = "Apache-2.0"
+dependencies = ["fastapi>=0.110", "uvicorn>=0.25", "httpx>=0.26", "cloudpickle>=3.0"]
 
 [project.optional-dependencies]
 # Lokale Spracherkennung direkt im Prozess statt ueber einen Kommando-Adapter.
@@ -18,5 +18,13 @@ whisper = ["faster-whisper>=1.0", "numpy>=1.24"]
 [project.scripts]
 si-m-bridge = "cli:main"
 
+[project.entry-points."hermes_agent.plugins"]
+si-m-bridge = "sim_bridge_plugin"
+
 [tool.setuptools]
 py-modules = ["connector", "cli", "audio_bridge", "hermes_runtime", "setup_wizard"]
+packages = ["sim_bridge_plugin"]
+package-dir = {sim_bridge_plugin = "."}
+
+[tool.setuptools.package-data]
+sim_bridge_plugin = ["plugin.yaml", "NOTICE"]

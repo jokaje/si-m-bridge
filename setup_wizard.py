@@ -6,6 +6,7 @@ Applying them stays an explicit human action -- that is the point: every
 operator picks their own reachability model for their own network.
 """
 import ipaddress
+import re
 import json
 import os
 import shutil
@@ -18,9 +19,9 @@ from urllib.parse import urlsplit
 # HTTPS with system CAs only, so loopback and plain LAN HTTP are excluded.
 MODES = {
     'tailscale': {
-        'title': 'Tailscale (empfohlen fuer Zuhause)',
-        'summary': 'HTTPS ueber das eigene Tailnet, kein Port nach aussen, kein DNS-Eintrag noetig.',
-        'device_capable': True,
+        'title': 'Tailscale Serve (nur Tailnet-Clients)',
+        'summary': 'Nur fuer Tailnet-Clients; ein normaler WLAN-Orb erreicht Tailscale Serve nicht.',
+        'device_capable': False,
     },
     'caddy': {
         'title': 'Caddy mit eigener Domain',
@@ -94,7 +95,7 @@ def validate_public_url(url):
     """Device-facing URL must be https and carry no credentials or query."""
     if not isinstance(url, str) or not url:
         raise ValueError('URL fehlt')
-    if any(c in url for c in ('\\', '%', '\r', '\n', '\t', ' ')):
+    if any(ord(c) < 33 or ord(c) > 126 for c in url) or any(c in url for c in ('\\', '%')):
         raise ValueError('URL enthaelt unerlaubte Zeichen')
     parts = urlsplit(url)
     if parts.scheme != 'https':
@@ -104,6 +105,16 @@ def validate_public_url(url):
     host = parts.hostname
     if not host:
         raise ValueError('URL ohne Host')
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError('ungueltiger URL-Port') from exc
+    if ':' in parts.netloc.rsplit(']', 1)[-1] and port is None:
+        raise ValueError('ungueltiger URL-Port')
+    if not re.fullmatch(r'[A-Za-z0-9.-]+', host) or not all(
+        label and len(label) <= 63 and re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?', label)
+        for label in host.split('.')):
+        raise ValueError('ungueltiger Hostname')
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
@@ -117,7 +128,7 @@ def plan_exposure(mode, *, domain=None, port=DEFAULT_PORT, url=None, tailnet_nam
     """Build the plan for one exposure mode. Pure function, no side effects."""
     if mode not in MODES:
         raise ValueError('unbekannter Modus: %s' % mode)
-    if not isinstance(port, int) or not 1 <= port <= 65535:
+    if type(port) is not int or not 1 <= port <= 65535:
         raise ValueError('ungueltiger Port')
 
     plan = {
@@ -149,14 +160,15 @@ def plan_exposure(mode, *, domain=None, port=DEFAULT_PORT, url=None, tailnet_nam
         need(probe['available'], 'Tailscale laeuft mit MagicDNS (%s)' % probe.get('reason', ''))
         name = probe.get('dns_name')
         if name:
+            validate_public_url('https://' + name)
+            if not name.endswith('.ts.net'):
+                raise ValueError('Tailnet-Name muss auf .ts.net enden')
             plan['base_url'] = 'https://%s' % name
             plan['steps'] = [
-                'tailscale cert %s      # einmalig, erneuert sich selbst' % name,
                 'tailscale serve --bg --https=443 http://127.0.0.1:%d' % port,
                 'tailscale serve status  # zeigt die aktive Zuordnung',
             ]
-            plan['notes'].append('Nur Geraete in deinem Tailnet erreichen den Endpunkt.')
-            plan['notes'].append('Die Firmware braucht zusaetzlich Netzzugang ins Tailnet (gleiches WLAN/Geraet im Netzknoten).')
+            plan['notes'].append('Nur Tailnet-Clients erreichen Tailscale Serve. Ein WLAN-Orb ohne Tailscale-Client kann diese URL NICHT erreichen; gleiches WLAN oder ein Subnet-Router in Gegenrichtung helfen nicht. Kein QR-Pairing damit.')
         else:
             plan['base_url'] = 'https://<dein-node>.<dein-tailnet>.ts.net'
         return plan
@@ -164,12 +176,14 @@ def plan_exposure(mode, *, domain=None, port=DEFAULT_PORT, url=None, tailnet_nam
     # Every remaining mode needs a real domain.
     need(bool(domain), 'Domain oder Hostname fuer den Endpunkt')
     if domain:
-        plan['base_url'] = validate_public_url('https://' + str(domain).strip('/'))
+        if not isinstance(domain, str) or not re.fullmatch(r'[A-Za-z0-9.-]+', domain):
+            raise ValueError('ungueltige Domain')
+        plan['base_url'] = validate_public_url('https://' + domain)
 
     if mode == 'caddy':
         probe = probe_binary('caddy')
         need(probe['available'], 'caddy ist installiert')
-        need(domain, 'oeffentlich aufloesender DNS-Eintrag auf diesen Host')
+        need(False, 'DNS und Ports 80/443 extern pruefen (nicht automatisch geprueft)')
         plan['files']['Caddyfile'] = (
             '%s {\n'
             '    reverse_proxy 127.0.0.1:%d\n'
@@ -185,7 +199,7 @@ def plan_exposure(mode, *, domain=None, port=DEFAULT_PORT, url=None, tailnet_nam
 
     if mode == 'nginx':
         need(probe_binary('nginx')['available'], 'nginx ist installiert')
-        need(probe_binary('certbot')['available'], 'certbot ist installiert (oder vorhandenes Zertifikat)')
+        need(False, 'TLS-Zertifikat und externe Erreichbarkeit pruefen (nicht automatisch geprueft)')
         host = domain or 'bridge.example.com'
         plan['files']['si-m-bridge.conf'] = (
             'server {\n'
@@ -218,7 +232,7 @@ def plan_exposure(mode, *, domain=None, port=DEFAULT_PORT, url=None, tailnet_nam
 
     if mode == 'cloudflare':
         need(probe_binary('cloudflared')['available'], 'cloudflared ist installiert')
-        need(domain, 'Domain, die in Cloudflare verwaltet wird')
+        need(False, 'Cloudflare-Account, Tunnel und DNS-Route pruefen (nicht automatisch geprueft)')
         host = domain or 'bridge.example.com'
         plan['files']['cloudflared-config.yml'] = (
             'tunnel: si-m-bridge\n'
@@ -242,6 +256,7 @@ def plan_exposure(mode, *, domain=None, port=DEFAULT_PORT, url=None, tailnet_nam
         need(bool(url), 'fertige HTTPS-URL deines Endpunkts')
         if url:
             plan['base_url'] = validate_public_url(url)
+        need(False, 'TLS-Vertrauen und Erreichbarkeit vom Orb-Netz pruefen (nicht automatisch geprueft)')
         plan['steps'] = ['Erreichbarkeit testen: curl -sS -o /dev/null -w "%{http_code}" <url>/v1/inbox/meta']
         plan['notes'].append('Der Proxy muss ungepufferte Antworten durchlassen (Audio-Stream).')
         return plan

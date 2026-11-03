@@ -71,10 +71,20 @@ class RuntimeTests(unittest.TestCase):
                     asyncio.run(check())
                     self.assertGreaterEqual(len(Provider.requests),2)
                     self.assertGreaterEqual(sum(path=='/v1/chat/completions' for path,_ in Provider.requests),2)
+                    second = [body for path, body in Provider.requests if path=='/v1/chat/completions'][-1]
+                    self.assertTrue(any(m.get('role')=='user' and m.get('content')=='Synthetic hello'
+                                        for m in second['messages']), 'second turn must include prior user turn')
                     prompts=json.dumps([body for _,body in Provider.requests])
                     self.assertIn('ISOLATED_SOUL_MARKER',prompts)
                     self.assertIn('ISOLATED_MEMORY_MARKER',prompts)
                     self.assertIn('sim_notify',prompts)
+                    import sqlite3
+                    with sqlite3.connect(home/'sim-inbox.sqlite') as history_db:
+                        rows = json.loads(history_db.execute(
+                            'SELECT history FROM turn_history').fetchone()[0])
+                    users = [m.get('content') for m in rows if m.get('role') == 'user']
+                    self.assertEqual(users, ['Synthetic hello', 'Synthetic follow-up'])
+                    self.assertEqual(rows[-1].get('role'), 'assistant')
 
                     runtime.close(); store.db.close()
             finally:
@@ -97,7 +107,8 @@ class RuntimeTests(unittest.TestCase):
                 'memory:\n  memory_enabled: false\n  user_profile_enabled: false\n')
             Provider.blocked = 'BLOCK_WORKER'; Provider.entered = threading.Event()
             try:
-                with patch.dict(os.environ, {'HERMES_HOME': str(home)}):
+                with patch.dict(os.environ, {'HERMES_HOME': str(home), 'SIM_CONNECTOR_HERMES_HOME': str(home),
+                                            'SIM_CONNECTOR_DB': str(home/'sim-inbox.sqlite')}):
                     runtime = HermesRuntime('synthetic', str(home), deadline=7)
                     async def exercise():
                         first = asyncio.create_task(runtime('BLOCK_WORKER', 'session-a'))

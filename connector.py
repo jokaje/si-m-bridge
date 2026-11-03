@@ -1,14 +1,19 @@
 """Standalone SI-M connector; no import-time database or network activity."""
 import asyncio
+import cloudpickle
 import base64
 import hashlib
 import inspect
 import ipaddress
 import json
+import logging
+import multiprocessing
 import os
 import re
 import secrets
+import signal
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlencode
@@ -23,10 +28,12 @@ else:  # standalone CLI and local tests
     from audio_bridge import AudioUnavailable, frames
 
 IDENT = re.compile(r'^[A-Za-z0-9_.-]{1,128}$')
+_SYNC_SLOTS = threading.BoundedSemaphore(2)
+_AUDIO_LOG = logging.getLogger('si_m_bridge.audio')
 
-def canonical_store(path):
-    """Reject aliases and paths outside the selected private profile."""
-    home = Path(os.environ['SIM_CONNECTOR_HERMES_HOME']).resolve(strict=True)
+def canonical_store(path, home=None):
+    """Reject aliases and paths outside the selected private state directory."""
+    home = Path(home if home is not None else os.environ['SIM_CONNECTOR_HERMES_HOME']).resolve(strict=True)
     candidate = Path(path).absolute()
     if candidate.is_symlink() or candidate.resolve() != home / 'sim-inbox.sqlite':
         raise ValueError('inbox store must be the profile canonical path')
@@ -163,13 +170,72 @@ def _is_async_callable(fn):
     return inspect.iscoroutinefunction(call)
 
 
-async def _call(fn, *args, timeout=None):
-    """Await an async adapter, or run a sync one off the event loop."""
+async def _call(fn, *args, timeout=None, shared=False):
+    """Await async adapters; isolate synchronous adapters in killable workers."""
     if _is_async_callable(fn):
         coro = fn(*args)
-    else:
-        coro = asyncio.to_thread(fn, *args)
-    return await asyncio.wait_for(coro, timeout=timeout) if timeout else await coro
+        return await asyncio.wait_for(coro, timeout=timeout) if timeout else await coro
+    if shared:
+        if not _SYNC_SLOTS.acquire(blocking=False):
+            raise AudioUnavailable('adapter busy')
+        task = asyncio.create_task(asyncio.to_thread(fn, *args))
+        task.add_done_callback(lambda done: (_SYNC_SLOTS.release(), done.exception() if not done.cancelled() else None))
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    if not _SYNC_SLOTS.acquire(blocking=False):
+        raise AudioUnavailable('adapter busy')
+    # Serialize closures explicitly; spawn never inherits the server's threads.
+    try:
+        payload = cloudpickle.dumps((fn, args))
+        if len(payload) > 2_000_000:
+            raise AudioUnavailable('adapter configuration oversized')
+        ctx = multiprocessing.get_context('spawn')
+        parent, child = ctx.Pipe(duplex=False)
+        proc = ctx.Process(target=_sync_worker, args=(child, payload))
+        proc.start()
+    except BaseException:
+        _SYNC_SLOTS.release()
+        raise
+    child.close()
+    try:
+        deadline = asyncio.get_running_loop().time() + (timeout or 90)
+        while not parent.poll():
+            if not proc.is_alive():
+                raise AudioUnavailable('adapter worker failed')
+            if asyncio.get_running_loop().time() >= deadline:
+                raise asyncio.TimeoutError()
+            await asyncio.sleep(.01)
+        ok, value = parent.recv()
+        if not ok:
+            raise AudioUnavailable('adapter failed')
+        return value
+    finally:
+        if proc.is_alive():
+            try:
+                # The child may not have reached setsid yet; never signal the
+                # server's own group, and always kill the child itself.
+                if os.getpgid(proc.pid) == proc.pid:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except ProcessLookupError:
+                pass
+        await asyncio.to_thread(proc.join)
+        parent.close()
+        _SYNC_SLOTS.release()
+
+
+def _sync_worker(pipe, payload):
+    os.setsid()
+    try:
+        fn, args = cloudpickle.loads(payload)
+        value = fn(*args)
+        if not isinstance(value, (bytes, str)) or len(value) > 2_000_000:
+            raise ValueError('invalid adapter output')
+        pipe.send((True, value))
+    except Exception:
+        pipe.send((False, None))
+    finally:
+        pipe.close()
 
 
 def create_app(store, hermes_url=None, hermes_key=None, transcribe=None, hermes_profile=None, synthesize=None, gateway_attestation=None, turn_runner=None):
@@ -180,8 +246,11 @@ def create_app(store, hermes_url=None, hermes_key=None, transcribe=None, hermes_
             maximum=256000 if request.url.path=='/v1/turn-stream' and request.headers.get('content-type','').startswith('application/vnd.kim.pcm;') else 90000
             length=request.headers.get('content-length')
             if length and (not length.isdigit() or int(length)>maximum): return JSONResponse({'error':'too large'},status_code=413)
-            body=await request.body()
-            if len(body)>maximum: return JSONResponse({'error':'too large'},status_code=413)
+            body=bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body)>maximum: return JSONResponse({'error':'too large'},status_code=413)
+            request._body=bytes(body)
         response=await call_next(request)
         response.headers['Cache-Control']='no-store'
         return response
@@ -217,12 +286,18 @@ def create_app(store, hermes_url=None, hermes_key=None, transcribe=None, hermes_
         try:
             data=await request.json()
             if set(data)!={'version','text'} or data['version']!=1 or not isinstance(data['text'],str) or not 1<=len(data['text'])<=4096: raise ValueError()
-            reply=await _call(turn_runner,data['text'],store.session(s)) if turn_runner else await hermes_turn(hermes_url,hermes_key,data['text'],store.session(s))
+            reply=await _call(turn_runner,data['text'],store.session(s), shared=True) if turn_runner else await hermes_turn(hermes_url,hermes_key,data['text'],store.session(s))
         except (ValueError,KeyError,TypeError,httpx.HTTPError): raise HTTPException(503,'turn unavailable')
         return {'version':1,'reply':reply}
     @app.post('/v1/turn-stream')
     async def audio(request:Request):
         s=scope(request)
+        stage='input'
+        started=time.monotonic()
+        input_bytes=0
+        reply_chars=0
+        output_bytes=0
+        frame_count=0
         try:
             if request.headers.get('content-type','').split(';')[0].strip() == 'application/vnd.kim.pcm':
                 if request.headers.get('content-type','').strip() != 'application/vnd.kim.pcm;rate=16000;channels=1;format=s16le': raise ValueError()
@@ -232,12 +307,42 @@ def create_app(store, hermes_url=None, hermes_key=None, transcribe=None, hermes_
                 if set(data)!={'version','pcm16le_b64','sample_rate'} or data['version']!=1 or data['sample_rate']!=16000 or not isinstance(data['pcm16le_b64'],str) or len(data['pcm16le_b64'])>90000: raise ValueError()
                 pcm=base64.b64decode(data['pcm16le_b64'],validate=True)
             if not pcm or len(pcm)>(256000 if request.headers.get('content-type','').startswith('application/vnd.kim.pcm;') else 64000) or len(pcm)%2 or transcribe is None or synthesize is None: raise ValueError()
+            input_bytes=len(pcm)
+            stage='stt'
             result=await _call(transcribe,pcm,timeout=15)
             text=result.decode('utf-8') if isinstance(result,bytes) else result
             if not isinstance(text,str) or not 1<=len(text)<=4096: raise ValueError()
-            reply=await _call(turn_runner,text,store.session(s)) if turn_runner else await hermes_turn(hermes_url,hermes_key,text,store.session(s))
-            pcm_out=await _call(synthesize,reply,timeout=30)
+            stage='agent'
+            reply=await _call(turn_runner,text,store.session(s),shared=True) if turn_runner else await hermes_turn(hermes_url,hermes_key,text,store.session(s))
+            reply_chars=len(reply) if isinstance(reply,str) else 0
+            stage='tts'
+            # Bound each backend WAV separately and the complete 16-frame wire
+            # response as a whole. Overflow fails explicitly, never clips words.
+            from audio_bridge import speech_chunks
+            pieces=[]
+            async with asyncio.timeout(75):
+                for spoken in speech_chunks(reply):
+                    part=await _call(synthesize,spoken,timeout=30)
+                    if not isinstance(part,bytes) or not part or len(part)%2:
+                        raise AudioUnavailable('invalid synthesized PCM')
+                    if sum(map(len,pieces))+len(part)>1_280_000:
+                        raise AudioUnavailable('speech exceeds wire budget')
+                    pieces.append(part)
+            pcm_out=b''.join(pieces)
+            output_bytes=len(pcm_out) if isinstance(pcm_out,bytes) else 0
+            stage='frames'
             chunks=frames(pcm_out)
-        except (ValueError,KeyError,TypeError,UnicodeError,httpx.HTTPError,asyncio.TimeoutError,AudioUnavailable,OSError): raise HTTPException(503,'audio unavailable')
+            frame_count=len(chunks)-2
+        except (ValueError,KeyError,TypeError,UnicodeError,httpx.HTTPError,asyncio.TimeoutError,AudioUnavailable,OSError) as exc:
+            # Fixed vocabulary only: exception messages can contain transcripts or URLs.
+            kind=type(exc).__name__ if type(exc) in (ValueError,KeyError,TypeError,UnicodeError,asyncio.TimeoutError,AudioUnavailable,OSError) else 'HTTPError'
+            known_reasons={'speech exceeds wire budget', 'speech exceeds turn budget', 'TTS response oversized',
+                           'unsupported WAV format', 'adapter timed out', 'invalid synthesized PCM'}
+            reason=str(exc) if type(exc) is AudioUnavailable and str(exc) in known_reasons else 'other'
+            _AUDIO_LOG.warning('audio_failure stage=%s kind=%s reason=%s input_bytes=%d reply_chars=%d output_bytes=%d frames=%d elapsed_ms=%d',
+                               stage,kind,reason.replace(' ', '_'),input_bytes,reply_chars,output_bytes,frame_count,int((time.monotonic()-started)*1000))
+            if reason in ('speech exceeds wire budget', 'speech exceeds turn budget'):
+                raise HTTPException(422,'spoken answer exceeds device audio budget; please request a shorter answer') from None
+            raise HTTPException(503,'audio unavailable') from None
         return StreamingResponse(iter(chunks),media_type='application/vnd.kim.stream-v1')
     return app

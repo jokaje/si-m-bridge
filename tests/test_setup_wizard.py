@@ -21,9 +21,9 @@ class ModeCatalogTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             sw.plan_exposure('open-the-floodgates')
 
-    def test_only_loopback_is_not_device_capable(self):
+    def test_tailnet_only_and_loopback_are_not_device_capable(self):
         for mode, entry in sw.MODES.items():
-            self.assertEqual(entry['device_capable'], mode != 'loopback', mode)
+            self.assertEqual(entry['device_capable'], mode not in ('loopback', 'tailscale'), mode)
 
 
 class DeviceUrlTest(unittest.TestCase):
@@ -86,8 +86,29 @@ class PrerequisiteTest(unittest.TestCase):
         self.assertIn('127.0.0.1:9999', plan['files']['Caddyfile'])
 
     def test_invalid_port_rejected(self):
+        for port in (0, 65536, True, -1):
+            with self.assertRaises(ValueError):
+                sw.plan_exposure('caddy', domain='bridge.example.com', port=port)
+
+    def test_untrusted_domain_never_reaches_configs_or_shell_steps(self):
+        for domain in ('evil.example\nserver {', 'host;touch x', 'host/path', 'host:443', ' host'):
+            for mode in ('caddy', 'nginx', 'cloudflare'):
+                with self.assertRaises(ValueError):
+                    sw.plan_exposure(mode, domain=domain)
+
+    def test_bad_url_ports_and_hosts_rejected(self):
+        for url in ('https://bridge.example.com:abc', 'https://bridge.example.com:99999',
+                    'https://bridge.example.com:', 'https://bad_host.example',
+                    'https://bridge.example.com\x00evil'):
+            with self.assertRaises(ValueError, msg=url):
+                sw.validate_public_url(url)
+
+    def test_tailscale_is_never_marked_orb_reachable(self):
+        plan = sw.plan_exposure('tailscale', tailnet_name='host.tail1.ts.net')
+        self.assertFalse(plan['device_capable'])
+        self.assertIn('NICHT', sw.render_plan(plan))
         with self.assertRaises(ValueError):
-            sw.plan_exposure('caddy', domain='bridge.example.com', port=0)
+            sw.plan_exposure('tailscale', tailnet_name='bad.example.com')
 
 
 class WriteTest(unittest.TestCase):

@@ -1,7 +1,7 @@
 """End-to-end audio pipeline against real local components.
 
 This is the test the earlier review wanted: real microphone-shaped PCM in, real
-speech recognition, a real agent turn, real speech synthesis, real framed PCM
+speech recognition, a synthetic fixed-answer turn, real speech synthesis, real framed PCM
 out. Nothing here is mocked except the agent itself, because calling a paying
 model provider from a test suite is not acceptable.
 

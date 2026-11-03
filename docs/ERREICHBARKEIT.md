@@ -16,7 +16,7 @@ bewusste Entscheidung pro Installation.
 python cli.py setup
 ```
 
-Fragt nach dem Weg, prueft die Voraussetzungen auf diesem Host und zeigt einen
+Fragt nach dem Weg, prueft nur lokale Programme und zeigt einen
 Plan. Mit Flags laesst sich das auch skripten:
 
 ```bash
@@ -34,13 +34,12 @@ damit du sie vor dem Anwenden lesen kannst.
 
 ## Die Modi im Detail
 
-### `tailscale` – empfohlen fuer zuhause
+### `tailscale` – nur Tailnet-Clients, nicht direkt fuer den WLAN-Orb
 
 **Du brauchst:** Tailscale auf dem Host, angemeldet, MagicDNS und HTTPS im
 Tailnet aktiviert.
 
 ```bash
-tailscale cert dein-host.tail1234.ts.net
 tailscale serve --bg --https=443 http://127.0.0.1:8766
 tailscale serve status
 ```
@@ -48,10 +47,11 @@ tailscale serve status
 **Vorteile:** kein Port im Router, kein DNS-Eintrag, Zertifikat erneuert sich
 selbst, kein Angriffsflaeche aus dem offenen Internet.
 
-**Zu beachten:** Der Orb muss im Tailnet erreichbar sein. Im Heimnetz typisch
-ueber einen Tailscale-Netzknoten auf dem Router oder einem immer laufenden
-Rechner. Der Name ist nur innerhalb deines Tailnets aufloesbar – Geraete ohne
-Tailscale kommen nicht durch, das ist der Sinn.
+**Nicht geraetetauglich:** Der Orb hat keinen Tailscale-Client. Ein Router oder
+anderer Tailnet-Knoten im selben WLAN gibt dem Orb keinen Zugriff auf
+Tailscale Serve; Subnet-Routing bewirkt die falsche Richtung. Nur als
+Host/Tailnet-Test nutzen, nicht zum QR-Pairing. Fuer den Orb einen separat
+geprueften, aus seinem Netz erreichbaren HTTPS-Endpunkt einrichten.
 
 **Wenn der Wizard keinen Namen findet:** MagicDNS oder HTTPS-Zertifikate sind im
 Tailnet deaktiviert. Beides laesst sich in der Tailscale-Verwaltung

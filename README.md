@@ -1,5 +1,27 @@
 # SI-M Bridge
 
+## Bestehenden default-Hermes-Agenten statt Profilkopie anbinden
+
+`SIM_AGENT_MODE=gateway` benutzt die authentifizierte lokale Hermes-API
+(`SIM_GATEWAY_URL=http://127.0.0.1:8765`) und verlangt
+`SIM_HERMES_PROFILE=default`. `SIM_GATEWAY_KEY_FILE` zeigt auf eine private
+0600-Datei mit dem **bereits vorhandenen** API_SERVER_KEY (nur der Schlüssel,
+keine dotenv-Zeile). Der Bridge-DB-Pfad bleibt im separaten privaten
+`SIM_CONNECTOR_HERMES_HOME` (0700), als `sim-inbox.sqlite`; dieses Verzeichnis
+ist **kein Hermes-Profil** und enthält keine kopierten Memories. Der Gateway
+speichert Orb-Unterhaltungen unter eigener `si-m-orb-*` Session-Key-Namespace
+im bestehenden default-Profil; Telegram-Chats werden nicht übernommen.
+
+`si-m-bridge --db "$SIM_CONNECTOR_DB" doctor` prüft 401 ohne und 200 mit
+Gateway-Key. `serve` bindet weiterhin ausschließlich Loopback. Für den
+öffentlichen HTTPS-Vhost ist `tools/activate-bridge-nginx-proxy.sh` ein
+separater, vor Anwendung zu prüfender Root-Operator-Schritt; er aktiviert
+nur den bereits vorhandenen dedizierten 503-Vhost und prüft danach 401.
+**Benachrichtigungen aus Hermes heraus** brauchen zusätzlich eine explizit
+autorisierte Installation/Aktivierung des SI-M-Plugins im default-Profil mit
+exakt demselben `SIM_CONNECTOR_DB`/Owner/Profile-Binding. Gateway-Turns allein
+aktivieren weder das Plugin noch Agenten-Tools für die Inbox.
+
 Verbindet einen **Hermes-Agenten** mit einem **SI-M Orb**. Der Orb zeigt
 Benachrichtigungen an, wenn dein Agent eine Aufgabe erledigt hat oder eine
 Rückfrage offen ist – und du redest per Sprache mit genau dem Agenten, der am
@@ -75,17 +97,20 @@ Damit du nicht mehr erwartest, als drin ist:
 
 > **Wichtig:** Die Bridge redet mit dem Hermes-Agenten ueber dessen interne APIs.
 > Sie muss deshalb mit **dem Python laufen, in dem Hermes installiert ist** – ein
-> eigenes virtualenv reicht nicht. Diesen Ablauf habe ich auf einem fremden
-> System durchgespielt; er funktioniert so.
+> eigenes virtualenv reicht nicht. Das Wheel wurde in einem sauberen Wegwerf-venv geprueft; der Hermes-Agentenpfad
+> braucht weiterhin einen Interpreter mit Hermes. Keine Produktionsinstallation erfolgt.
 
 ```bash
 git clone https://github.com/jokaje/si-m-bridge.git
 cd si-m-bridge
 
 # 1. In die Hermes-Umgebung installieren (Pfad anpassen!)
-HERMES_VENV=~/.hermes/venv          # dort, wo dein "hermes" liegt
-$HERMES_VENV/bin/pip install -e .
-$HERMES_VENV/bin/si-m-bridge --help  # muss die Unterbefehle zeigen
+# Hermes-Interpreter feststellen (verwaltete Installationen haben ggf. kein pip).
+# Niemals blind ein verwaltetes/live Hermes-venv mit pip veraendern.
+# In einer getrennten, kompatiblen Hermes-Umgebung installieren; fuer verwaltete
+# Installationen den dokumentierten Hermes-Plugin-Installationsweg nutzen.
+python -m pip install .              # nur im eigenen, NICHT live Hermes-Interpreter
+si-m-bridge --help  # muss die Unterbefehle zeigen
 ```
 
 ```bash
@@ -144,8 +169,8 @@ $HERMES_VENV/bin/si-m-bridge --db "$SIM_CONNECTOR_DB" pair \
 Der `pair`-Befehl gibt eine `sim://pair?...`-URI aus (rund 130 Zeichen). Die
 gehoert in einen QR-Code – **nicht** in Logs, Screenshots oder Chats.
 
-**Erster Agenten-Turn:** rechne beim ersten Aufruf mit 20–40 Sekunden, weil das
-Modell erst geladen wird. Danach antwortet es deutlich schneller.
+**Agenten-Turn:** Laufzeit haengt vom gewaehlten Modell und Provider ab.
+Die Bridge beendet einen Turn spaetestens nach 90 Sekunden.
 
 ---
 
@@ -155,11 +180,12 @@ Der Orb spricht **ausschliesslich HTTPS mit System-Zertifizierungsstellen**.
 Ein einfaches `http://192.168.x.x:8766` ist deshalb keine Option – auch wenn es
 bequem waere. Die Bridge lehnt solche URLs ab.
 
-`python cli.py setup` fragt dich, welchen Weg du willst:
+`python cli.py setup` fragt dich, welchen Weg du willst. Voraussetzungen und
+Geraete-Erreichbarkeit muessen ausserhalb des Wizards wirklich geprueft werden:
 
 | Modus | Was du brauchst | Port nach aussen |
 |---|---|---|
-| `tailscale` | Tailscale auf dem Host, MagicDNS aktiv | nein |
+| `tailscale` | Nur Tailnet-Clients; fuer WLAN-Orb ohne Tailscale **nicht geeignet** | nein |
 | `caddy` | eigene Domain mit DNS auf den Host | 80 + 443 |
 | `nginx` | nginx + Zertifikat (z. B. certbot) | 80 + 443 |
 | `cloudflare` | Cloudflare-Account + Domain | nein |
@@ -172,9 +198,9 @@ ehrlich was fehlt und schreibt die Proxy-Konfiguration zum Reviewen nach
 
 Ausfuehrlich: [docs/ERREICHBARKEIT.md](docs/ERREICHBARKEIT.md)
 
-### Warum Tailscale der bequemste Weg ist
+### Tailscale Serve: kein direkter Weg fuer den WLAN-Orb
 
-Kein Port im Router, kein DNS-Eintrag, kein Zertifikatsablauf:
+Serve exponiert nur im Tailnet, nicht im normalen WLAN:
 
 ```bash
 tailscale cert orb-host.tail1234.ts.net
@@ -182,8 +208,9 @@ tailscale serve --bg --https=443 http://127.0.0.1:8766
 tailscale serve status
 ```
 
-Der Orb muss dafuer im selben Tailnet erreichbar sein (z. B. ueber einen
-Netzknoten im Heimnetz).
+Der Orb hat keinen Tailscale-Client. Gleiches WLAN oder ein Tailscale-Subnet-Router
+auf einem anderen Geraet machen ihn nicht zum Tailnet-Client. Fuer Pairing eine
+vom Orb erreichbare HTTPS-Domain mit vertrauenswuerdigem Zertifikat waehlen.
 
 ---
 
@@ -254,6 +281,12 @@ export SIM_TTS_URL=http://127.0.0.1:8880
 # ... oder eigenes Kommando (Text auf stdin, WAV auf stdout)
 export SIM_TTS_COMMAND='["mein-tts"]'
 ```
+
+Sprache ist optional; die UI muss Text ohne STT erlauben. Lokales Whisper wird erst
+im isolierten Spawn-Worker aus dem Modellpfad geladen (pro Anfrage, mit zusaetzlicher
+Startlatenz). Synchrone Adapter laufen mit zwei Plaetzen und Deadline in killbaren
+Spawn-Prozessen; `cloudpickle` ist dafuer eine Pflichtabhaengigkeit. Das begrenzt
+haengende Erkennung, garantiert aber keine Ruecknahme bereits erfolgter Nebenwirkungen.
 
 Fehlt ein Adapter, antwortet die Bridge mit **503** statt mit Stille.
 
