@@ -1,27 +1,5 @@
 # SI-M Bridge
 
-## Bestehenden default-Hermes-Agenten statt Profilkopie anbinden
-
-`SIM_AGENT_MODE=gateway` benutzt die authentifizierte lokale Hermes-API
-(`SIM_GATEWAY_URL=http://127.0.0.1:8765`) und verlangt
-`SIM_HERMES_PROFILE=default`. `SIM_GATEWAY_KEY_FILE` zeigt auf eine private
-0600-Datei mit dem **bereits vorhandenen** API_SERVER_KEY (nur der Schlüssel,
-keine dotenv-Zeile). Der Bridge-DB-Pfad bleibt im separaten privaten
-`SIM_CONNECTOR_HERMES_HOME` (0700), als `sim-inbox.sqlite`; dieses Verzeichnis
-ist **kein Hermes-Profil** und enthält keine kopierten Memories. Der Gateway
-speichert Orb-Unterhaltungen unter eigener `si-m-orb-*` Session-Key-Namespace
-im bestehenden default-Profil; Telegram-Chats werden nicht übernommen.
-
-`si-m-bridge --db "$SIM_CONNECTOR_DB" doctor` prüft 401 ohne und 200 mit
-Gateway-Key. `serve` bindet weiterhin ausschließlich Loopback. Für den
-öffentlichen HTTPS-Vhost ist `tools/activate-bridge-nginx-proxy.sh` ein
-separater, vor Anwendung zu prüfender Root-Operator-Schritt; er aktiviert
-nur den bereits vorhandenen dedizierten 503-Vhost und prüft danach 401.
-**Benachrichtigungen aus Hermes heraus** brauchen zusätzlich eine explizit
-autorisierte Installation/Aktivierung des SI-M-Plugins im default-Profil mit
-exakt demselben `SIM_CONNECTOR_DB`/Owner/Profile-Binding. Gateway-Turns allein
-aktivieren weder das Plugin noch Agenten-Tools für die Inbox.
-
 Verbindet einen **Hermes-Agenten** mit einem **SI-M Orb**. Der Orb zeigt
 Benachrichtigungen an, wenn dein Agent eine Aufgabe erledigt hat oder eine
 Rückfrage offen ist – und du redest per Sprache mit genau dem Agenten, der am
@@ -93,84 +71,61 @@ Damit du nicht mehr erwartest, als drin ist:
 | Optional: Spracherkennung | lokales Whisper-Modell oder Kommando-Adapter |
 | Optional: Sprachausgabe | lokaler WAV-Endpunkt oder Kommando-Adapter |
 
-## Schnellstart
+## Installation und Start (Quell-Export)
 
-> **Wichtig:** Die Bridge redet mit dem Hermes-Agenten ueber dessen interne APIs.
-> Sie muss deshalb mit **dem Python laufen, in dem Hermes installiert ist** – ein
-> eigenes virtualenv reicht nicht. Das Wheel wurde in einem sauberen Wegwerf-venv geprueft; der Hermes-Agentenpfad
-> braucht weiterhin einen Interpreter mit Hermes. Keine Produktionsinstallation erfolgt.
+Die Bridge bietet zwei Runtime-Modi: `gateway` verbindet einen bestehenden lokalen,
+authentifizierten Hermes-Gateway; `embedded` benutzt interne Hermes-Python-APIs und
+benötigt deshalb denselben Python-Interpreter wie Hermes. Wähle den Modus bewusst.
+Ein frischer Python-Interpreter ohne Hermes kann nur den Gateway-Modus ausführen.
+Keine Installation verändert automatisch dein Hermes-Profil oder deinen HTTPS-Proxy.
 
 ```bash
 git clone https://github.com/jokaje/si-m-bridge.git
 cd si-m-bridge
-
-# 1. In die Hermes-Umgebung installieren (Pfad anpassen!)
-# Hermes-Interpreter feststellen (verwaltete Installationen haben ggf. kein pip).
-# Niemals blind ein verwaltetes/live Hermes-venv mit pip veraendern.
-# In einer getrennten, kompatiblen Hermes-Umgebung installieren; fuer verwaltete
-# Installationen den dokumentierten Hermes-Plugin-Installationsweg nutzen.
-python -m pip install .              # nur im eigenen, NICHT live Hermes-Interpreter
-si-m-bridge --help  # muss die Unterbefehle zeigen
+# In einem eigens gewählten Python-Environment (nicht blind im Live-Hermes-venv):
+python -m pip install .
+si-m-bridge --help
+mkdir -p ~/si-m-bridge-state && chmod 700 ~/si-m-bridge-state
+export SIM_CONNECTOR_HERMES_HOME=~/si-m-bridge-state
+export SIM_CONNECTOR_DB=$SIM_CONNECTOR_HERMES_HOME/sim-inbox.sqlite
+export SIM_CONNECTOR_OWNER=owner-a SIM_CONNECTOR_PROFILE=default
+export SIM_HERMES_PROFILE=default SIM_AGENT_MODE=gateway
+export SIM_GATEWAY_URL=http://127.0.0.1:8642
+export SIM_GATEWAY_KEY_FILE=$HOME/.config/si-m-bridge/gateway-key
+# Die Schlüsseldatei muss den vorhandenen Gateway-API-Schlüssel enthalten und 0600 sein.
+si-m-bridge --db "$SIM_CONNECTOR_DB" doctor
+si-m-bridge --db "$SIM_CONNECTOR_DB" serve
 ```
+
+Der Gateway muss bereits laufen und die API authentifizieren; `doctor` prüft die
+Verbindung. Die Gateway-URL ist ein **lokaler Beispielwert**, kein voreingestellter
+privater Agent. Lege die Schlüsseldatei außerhalb des Repositories an; nie einen
+Schlüssel in Shell-History, QR oder Logs ausgeben. Im Gateway-Modus bleibt der
+Bridge-State separat; Orb-Turns nutzen eigene Sessions im gewählten Agentenprofil,
+nicht den Telegram-Verlauf. Benachrichtigungen aus Hermes brauchen zusätzlich eine
+explizite Plugin-Installation mit identischem DB-/Owner-/Profil-Binding.
+
+Im `embedded`-Modus installiere die Bridge in einer kompatiblen Hermes-Python-Umgebung,
+setze `SIM_AGENT_MODE=embedded` und `SIM_CONNECTOR_HERMES_HOME` auf ein privates
+Hermes-Home mit konfigurertem Modell/Provider. `SIM_HERMES_PROFILE` bezeichnet das
+gewählte Profil. Der Kompatibilitätscheck für interne APIs verweigert unbekannte
+Hermes-Versionen; das ist keine Garantie für alle Hermes-Installationen.
+
+Für HTTPS wähle `si-m-bridge setup --exposure nginx --domain bridge.example.com
+--no-write` (oder `caddy`, `cloudflare`, `existing`) und prüfe die generierten
+Konfigurationen vor Anwendung. Der Server selbst bindet ausschließlich Loopback.
+Der Orb braucht eine aus seinem WLAN erreichbare HTTPS-Adresse mit gültiger
+System-CA; Tailscale Serve allein genügt nicht. Erst nach Prüfung von DNS, TLS,
+Proxy und unauthentifiziertem `401` koppeln:
 
 ```bash
-# 2. Privates Home fuer den Orb-Agenten (nicht dein Hauptprofil!)
-mkdir -p ~/hermes-orb && chmod 700 ~/hermes-orb
-mkdir -p ~/hermes-orb/plugins/si-m-bridge
-cp plugin.yaml __init__.py connector.py audio_bridge.py ~/hermes-orb/plugins/si-m-bridge/
+si-m-bridge --db "$SIM_CONNECTOR_DB" pair \
+  --owner owner-a --profile default --device orb-a \
+  --base-url https://bridge.example.com
 ```
 
-`~/hermes-orb/config.yaml` anlegen – mit dem Provider, den dein Agent nutzt:
-
-```yaml
-model:
-  provider: <dein-provider>
-  default: <dein-modell>
-
-providers:
-  <dein-provider>:
-    api: <dein-endpunkt>
-    default_model: <dein-modell>
-
-plugins:
-  enabled:
-    - si-m-bridge
-
-platform_toolsets:
-  cli:
-    - sim_bridge        # nur wenn der Agent benachrichtigen darf
-```
-
-```bash
-# 3. Plugin aktivieren und pruefen
-export HERMES_HOME=~/hermes-orb
-$HERMES_VENV/bin/hermes plugins enable si-m-bridge
-$HERMES_VENV/bin/hermes plugins doctor --ci "$HERMES_HOME/plugins/si-m-bridge"
-
-# 4. Weg nach draussen planen (schreibt nur Konfig zum Pruefen)
-export SIM_CONNECTOR_HERMES_HOME=$HERMES_HOME
-export SIM_CONNECTOR_DB=$HERMES_HOME/sim-inbox.sqlite
-export SIM_HERMES_PROFILE=orb
-$HERMES_VENV/bin/si-m-bridge setup --exposure tailscale
-
-# 5. Konfiguration pruefen, dann Dienst starten (nur Loopback)
-$HERMES_VENV/bin/si-m-bridge --db "$SIM_CONNECTOR_DB" doctor
-$HERMES_VENV/bin/si-m-bridge --db "$SIM_CONNECTOR_DB" serve
-```
-
-Koppeln (Schritt 6) erst, wenn der HTTPS-Weg wirklich antwortet:
-
-```bash
-$HERMES_VENV/bin/si-m-bridge --db "$SIM_CONNECTOR_DB" pair \
-  --owner owner-a --profile orb --device orb-a \
-  --base-url https://orb-host.tail1234.ts.net
-```
-
-Der `pair`-Befehl gibt eine `sim://pair?...`-URI aus (rund 130 Zeichen). Die
-gehoert in einen QR-Code – **nicht** in Logs, Screenshots oder Chats.
-
-**Agenten-Turn:** Laufzeit haengt vom gewaehlten Modell und Provider ab.
-Die Bridge beendet einen Turn spaetestens nach 90 Sekunden.
+Die ausgegebene kurzlebige `sim://pair`-URI nur **lokal** als QR darstellen;
+nicht in Berichten, Screenshots oder fremden QR-Diensten veröffentlichen.
 
 ---
 
@@ -214,53 +169,14 @@ vom Orb erreichbare HTTPS-Domain mit vertrauenswuerdigem Zertifikat waehlen.
 
 ---
 
-## Den Agenten anbinden
+## Benachrichtigungs-Plugin
 
-Die Bridge laeuft **nicht** im Hauptprofil. Sie braucht ein eigenes Home:
-
-```bash
-export HERMES_HOME=/srv/hermes-orb     # vor dem Hermes-Import setzen
-```
-
-In diesem Home:
-
-```yaml
-# config.yaml
-model:
-  provider: <dein-provider>
-  default: <dein-modell>
-
-plugins:
-  enabled:
-    - si-m-bridge
-
-platform_toolsets:
-  cli:
-    - si_m_bridge        # nur wenn der Agent benachrichtigen darf
-```
-
-Plugin installieren und pruefen:
-
-```bash
-mkdir -p "$HERMES_HOME/plugins/si-m-bridge"
-cp plugin.yaml __init__.py connector.py audio_bridge.py \
-   "$HERMES_HOME/plugins/si-m-bridge/"
-
-HERMES_HOME=$HERMES_HOME hermes plugins enable si-m-bridge
-HERMES_HOME=$HERMES_HOME hermes plugins doctor --ci "$HERMES_HOME/plugins/si-m-bridge"
-```
-
-Damit der Agent benachrichtigen darf, muessen diese Variablen gesetzt sein – die
-Bridge weigert sich sonst:
-
-```bash
-SIM_CONNECTOR_OWNER=owner-a
-SIM_CONNECTOR_PROFILE=orb
-SIM_CONNECTOR_DB=$HERMES_HOME/sim-inbox.sqlite
-```
-
-Der Agent ruft dann `sim_notify` mit `event_id`, `kind` (`task_done` oder
-`question`), `title` und `body` auf. Gleiche `event_id` = kein Duplikat.
+`sim_notify` schreibt nur explizite Ereignisse (`task_done`, `question`) in die
+Inbox. Für den eingebetteten Agenten oder den bestehenden Gateway-Agenten ist
+eine **separate** Plugin-Aktivierung im richtigen Hermes-Profil erforderlich;
+der Bridge-Server allein aktiviert weder Plugin noch Toolset. Verwende denselben
+kanonischen `SIM_CONNECTOR_DB`-Pfad und `SIM_CONNECTOR_OWNER` /
+`SIM_CONNECTOR_PROFILE` wie beim Server. Siehe [Protokoll](docs/PROTOCOL.md).
 
 ---
 
@@ -344,43 +260,19 @@ python -m unittest discover -s tests -v
 
 ---
 
-## Betriebsdetails
+## Betriebsdetails und Grenzen
 
-- **Profilbindung:** Jede Runde startet einen installierten Hermes `AIAgent` in
-  einem eigenen Prozess unter dem festgelegten privaten `HERMES_HOME`, mit dessen
-  Modell-/Provider-Aufloesung (inklusive Hermes-OAuth), `SOUL`, konfigurierten
-  Erinnerungen, Skills und CLI-Toolsets. Es gibt keine `SIM_HERMES_*`-Overrides
-  fuer Endpunkt oder Schluessel: Provider-Konfiguration bleibt im Profil.
-- **Grenzen der Arbeit:** zwei Worker plaetze, 90 Sekunden Deadline je Runde,
-  Belegung fuehrt zu `busy` statt zu Warteschlange. Bei Timeout oder Abbruch wird
-  die Prozessgruppe beendet und der Worker eingesammelt, bevor der Platz frei
-  wird.
-- **Kompatibilitaet:** Die Bridge nutzt private Hermes-Integrations-APIs. Ein
-  Fail-Closed-Check prueft deren Signaturen beim Start; bei Abweichung startet
-  sie nicht, statt still falsch zu laufen. Getestet gegen die aktuell installierte
-  Hermes-Version, nicht gegen einen Versionsbereich.
-- **Inbox-Pfad:** CLI und Plugin muessen denselben kanonischen Pfad verwenden,
-  sonst brechen `pair` und `serve` vor dem ersten Zugriff ab.
-- **Benachrichtigungsumfang:** nur `task_done` und `question`; proaktive
-  Nachrichten sind aus. Akustik bei ausgeschaltetem Display ist Sache der
-  Firmware (Ruhezeit 22:00–07:00, ein leiser Ton, Display bleibt aus).
-
-## Stand und Grenzen
-
-Ehrlich, damit niemand mehr erwartet als da ist:
-
-- **Getestet:** 41 Selbsttests, darunter eine echte Hermes-Runde in einem leeren
-  Test-Home gegen einen synthetischen Test-Provider, Abbruch- und
-  Zeitlimitverhalten echter Worker-Prozesse, Kopplungs- und Inbox-Vertraege
-  gegen Firmware- und App-Seite.
-- **Audiokette echt durchgespielt:** PCM rein → lokales Whisper → Agentenrunde →
-  lokale Sprachausgabe → gerahmte PCM-Frames → wieder erkannt. Die Tests laufen
-  nur mit `SIM_TEST_STT_MODEL` und `SIM_TEST_TTS_URL`; `tools/hoerprobe.py`
-  erzeugt dazu eine mithoerbare WAV-Datei.
-- **Nicht getestet:** echtes Modell mit echten Zugangsdaten, Wiedergabe am
-  physischen Orb-Lautsprecher, Live-OAuth, ein produktiver Reverse Proxy.
-- Die Firmware-Seite (Benachrichtigungen, Aufwachen) ist ein separater Kandidat
-  und wird hier nicht ausgeliefert.
+- Gateway-Turns nutzen den bestehenden authentifizierten Gateway mit eigener
+  Orb-Session; eingebettete Turns nutzen private Hermes-Python-APIs und einen
+  fail-closed Signaturcheck. Beide haben maximal zwei Workerplätze und 90 Sekunden
+  Deadline. Abbruch macht Tool-Nebenwirkungen nicht rückgängig.
+- Sprache ist optional; echte STT/TTS-Adapter erfordern lokale Modelle oder Dienste.
+  Synthetische Tests belegen weder hörbare Ausgabe am Gerät noch Qualität echter
+  Sprachmodelle. Firmware und Android-App werden getrennt ausgeliefert.
+- Die Suite im frischen Klon überspringt Kreuztests ohne Nachbarprojekte und
+  externe Adapter; Testanzahl und Skips sind keine feste Produktzusage.
+- Installation, Proxy-Aktivierung, Plugin-Bindung, Zertifikat und ein hörbarer
+  Geräteturn müssen auf dem Zielsystem separat geprüft werden.
 
 ## Lizenz
 
